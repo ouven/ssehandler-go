@@ -10,8 +10,9 @@ import (
 
 type Event = sse.Event
 type PublishChannel = chan<- *Event
+type Client = eventChan
 
-type ClientInitFunc = func(client client, request *http.Request) error
+type ClientInitFunc = func(client Client, request *http.Request) error
 
 type SSEHandler interface {
 	http.Handler
@@ -22,28 +23,27 @@ type SSEHandler interface {
 }
 
 type eventChan = chan *Event
-type client = eventChan
 type registration struct {
-	client  client
+	client  Client
 	request *http.Request
 }
 
 type ssehandler struct {
 	eventInbound     eventChan
-	registered       map[client]interface{}
+	registered       map[Client]interface{}
 	register         chan registration
-	unregister       chan client
+	unregister       chan Client
 	stopNotification chan chan error
 }
 
-func (es *ssehandler) closeClient(client client) {
+func (es *ssehandler) closeClient(client Client) {
 	delete(es.registered, client)
 	close(client)
 	log.Printf("client unregistered, left %d clients", len(es.registered))
 }
 
 func (es *ssehandler) Start() error {
-	return es.StartInit(func(c client, r *http.Request) error { return nil })
+	return es.StartInit(func(c Client, r *http.Request) error { return nil })
 }
 
 func (es *ssehandler) StartInit(init ClientInitFunc) error {
@@ -85,10 +85,10 @@ func (es *ssehandler) Stop() {
 
 func NewSSEHandler() SSEHandler {
 	return &ssehandler{
-		registered:       make(map[client]interface{}),
-		eventInbound:     make(client, 20),
+		registered:       make(map[Client]interface{}),
+		eventInbound:     make(Client, 20),
 		register:         make(chan registration, 2),
-		unregister:       make(chan client, 2),
+		unregister:       make(chan Client, 2),
 		stopNotification: make(chan chan error),
 	}
 }
