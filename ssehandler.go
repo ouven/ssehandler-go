@@ -11,40 +11,66 @@ import (
 type Event = sse.Event
 type PublishChannel = chan<- *Event
 
+type ClientInitFunc = func(client client, request *http.Request) error
+
 type SSEHandler interface {
 	http.Handler
+	StartInit(ClientInitFunc) error
 	Start() error
 	Stop()
 	PublishChannel() PublishChannel
 }
 
 type eventChan = chan *Event
+type client = eventChan
+type registration struct {
+	client  client
+	request *http.Request
+}
 
 type ssehandler struct {
-	eventInbound eventChan
-	registered   map[eventChan]interface{}
-	register     chan eventChan
-	unregister   chan eventChan
+	eventInbound     eventChan
+	registered       map[client]interface{}
+	register         chan registration
+	unregister       chan client
+	stopNotification chan chan error
+}
+
+func (es *ssehandler) closeClient(client client) {
+	delete(es.registered, client)
+	close(client)
+	log.Printf("client unregistered, left %d clients", len(es.registered))
 }
 
 func (es *ssehandler) Start() error {
+	return es.StartInit(func(c client, r *http.Request) error { return nil })
+}
+
+func (es *ssehandler) StartInit(init ClientInitFunc) error {
 
 	go func() {
+	EventLoop:
 		for {
 			select {
-			case reg := <-es.register:
-				es.registered[reg] = nil
+			case registration := <-es.register:
+				es.registered[registration.client] = nil
+				init(registration.client, registration.request)
 				log.Printf("new client registered")
 
-			case awayClient := <-es.unregister:
-				delete(es.registered, awayClient)
-				close(awayClient)
-				log.Printf("client unregistered, left %d clients", len(es.registered))
+			case client := <-es.unregister:
+				es.closeClient(client)
 
 			case e := <-es.eventInbound:
 				for c := range es.registered {
 					c <- e
 				}
+
+			case stoppedChan := <-es.stopNotification:
+				for client := range es.registered {
+					es.closeClient(client)
+				}
+				stoppedChan <- nil
+				break EventLoop
 			}
 		}
 	}()
@@ -52,14 +78,18 @@ func (es *ssehandler) Start() error {
 }
 
 func (es *ssehandler) Stop() {
+	e := make(chan error)
+	es.stopNotification <- e
+	<-e
 }
 
 func NewSSEHandler() SSEHandler {
 	return &ssehandler{
-		registered:   make(map[eventChan]interface{}),
-		eventInbound: make(eventChan, 20),
-		register:     make(chan eventChan, 2),
-		unregister:   make(chan eventChan, 2),
+		registered:       make(map[client]interface{}),
+		eventInbound:     make(client, 20),
+		register:         make(chan registration, 2),
+		unregister:       make(chan client, 2),
+		stopNotification: make(chan chan error),
 	}
 }
 
@@ -75,7 +105,10 @@ func (es *ssehandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventChan := make(eventChan, 10)
-	es.register <- eventChan
+	es.register <- registration{
+		client:  eventChan,
+		request: r,
+	}
 
 	// Listen to the closing of the http connection via the CloseNotifier
 	notify := w.(http.CloseNotifier).CloseNotify()
