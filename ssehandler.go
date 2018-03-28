@@ -53,7 +53,7 @@ func (es *ssehandler) StartInit(init ClientInitFunc) error {
 		for {
 			select {
 			case registration := <-es.register:
-				es.registered[registration.client] = nil
+				es.registered[registration.client] = struct{}{}
 				init(registration.client, registration.request)
 				log.Printf("new client registered")
 
@@ -98,8 +98,10 @@ func (es *ssehandler) PublishChannel() PublishChannel {
 }
 
 func (es *ssehandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f, ok := w.(http.Flusher)
-	if !ok {
+	flusher, ok := w.(http.Flusher)
+	notifier, ok2 := w.(http.CloseNotifier)
+
+	if !(ok && ok2) {
 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
 		return
 	}
@@ -111,9 +113,8 @@ func (es *ssehandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Listen to the closing of the http connection via the CloseNotifier
-	notify := w.(http.CloseNotifier).CloseNotify()
 	go func() {
-		<-notify
+		<-notifier.CloseNotify()
 		es.unregister <- eventChan
 		log.Println("HTTP connection just closed.")
 	}()
@@ -133,7 +134,7 @@ EventLoop:
 		// writing an sse comment
 		case <-keepalive.C:
 			w.Write([]byte(": ping\n"))
-			f.Flush()
+			flusher.Flush()
 
 		// Read from our messageChan.
 		case event, open := <-eventChan:
@@ -143,7 +144,7 @@ EventLoop:
 
 			// Write to the ResponseWriter, `w`.
 			sse.Encode(w, *event)
-			f.Flush()
+			flusher.Flush()
 		}
 	}
 
